@@ -1,0 +1,28 @@
+# Node
+node_modules/
+npm-debug.log*
+.npm
+
+# Environment variables — NEVER commit these!
+.env
+.env.local
+.env.production
+
+# Build output
+frontend/dist/
+frontend/.vite/
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/

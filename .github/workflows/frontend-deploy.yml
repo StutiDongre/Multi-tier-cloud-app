@@ -1,0 +1,118 @@
+name: 🌐 Frontend — Build & Deploy to S3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'multi-tier-app/frontend/**'
+      - '.github/workflows/frontend-deploy.yml'
+  workflow_dispatch:      # Allow manual trigger
+
+env:
+  NODE_VERSION: '20'
+  WORKING_DIR:  multi-tier-app/frontend
+
+jobs:
+  # ── Job 1: Build ──────────────────────────────────────────────────────
+  build:
+    name: 🔨 Build React App
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: frontend-dist
+
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIR }}/package.json
+
+      - name: 📦 Install dependencies
+        working-directory: ${{ env.WORKING_DIR }}
+        run: npm ci
+
+      - name: 🔨 Build for production
+        working-directory: ${{ env.WORKING_DIR }}
+        env:
+          # Set your EC2/API URL here
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+        run: npm run build
+
+      - name: 📤 Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: ${{ env.WORKING_DIR }}/dist
+          retention-days: 1
+
+  # ── Job 2: Deploy to S3 ───────────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy to S3 + Invalidate CloudFront
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: production
+      url: ${{ steps.get-cf-url.outputs.url }}
+
+    steps:
+      - name: 📥 Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+
+      - name: 🔑 Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: 📤 Sync to S3
+        run: |
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_NAME }} \
+            --delete \
+            --cache-control "max-age=31536000" \
+            --exclude "*.html"
+
+          # HTML files — no cache (always fresh)
+          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_NAME }} \
+            --exclude "*" \
+            --include "*.html" \
+            --cache-control "no-cache, no-store, must-revalidate"
+
+          echo "✅ S3 sync complete"
+
+      - name: 🔄 Invalidate CloudFront cache
+        run: |
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*" \
+            --query 'Invalidation.Id' \
+            --output text)
+          echo "CloudFront invalidation ID: $INVALIDATION_ID"
+
+      - name: 🔗 Get CloudFront URL
+        id: get-cf-url
+        run: |
+          CF_DOMAIN=$(aws cloudfront get-distribution \
+            --id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --query 'Distribution.DomainName' \
+            --output text)
+          echo "url=https://${CF_DOMAIN}" >> $GITHUB_OUTPUT
+          echo "✅ Live at: https://${CF_DOMAIN}"
+
+      - name: 📊 Deployment Summary
+        run: |
+          echo "## 🚀 Frontend Deployed!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| S3 Bucket | \`${{ secrets.S3_BUCKET_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| CloudFront | \`${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Live URL | ${{ steps.get-cf-url.outputs.url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
